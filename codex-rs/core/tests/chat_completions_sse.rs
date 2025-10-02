@@ -49,6 +49,8 @@ async fn run_stream(sse_body: &str) -> Vec<ResponseEvent> {
         stream_max_retries: Some(0),
         stream_idle_timeout_ms: Some(5_000),
         requires_openai_auth: false,
+        oauth_device_flow: None,
+        models: None,
     };
 
     let codex_home = match TempDir::new() {

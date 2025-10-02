@@ -11,7 +11,7 @@ use codex_cli::SeatbeltCommand;
 use codex_cli::login::run_login_status;
 use codex_cli::login::run_login_with_api_key;
 use codex_cli::login::run_login_with_chatgpt;
-use codex_cli::login::run_login_with_github_copilot;
+use codex_cli::login::run_login_with_oauth_provider;
 use codex_cli::login::run_logout;
 use codex_cli::proto;
 use codex_common::CliConfigOverrides;
@@ -148,8 +148,8 @@ struct LoginCommand {
 enum LoginSubcommand {
     /// Show login status.
     Status,
-    /// Login using GitHub Copilot (device-code flow)
-    Copilot,
+    /// Login using OAuth for a specific provider (e.g., 'githubcopilot')
+    Provider { provider_id: String },
 }
 
 #[derive(Debug, Parser)]
@@ -290,8 +290,8 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 Some(LoginSubcommand::Status) => {
                     run_login_status(login_cli.config_overrides).await;
                 }
-                Some(LoginSubcommand::Copilot) => {
-                    run_login_with_github_copilot(login_cli.config_overrides).await;
+                Some(LoginSubcommand::Provider { provider_id }) => {
+                    run_login_with_oauth_provider(login_cli.config_overrides, provider_id).await;
                 }
                 None => {
                     if let Some(api_key) = login_cli.api_key {

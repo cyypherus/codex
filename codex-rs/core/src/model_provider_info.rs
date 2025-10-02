@@ -22,6 +22,27 @@ const MAX_STREAM_MAX_RETRIES: u64 = 100;
 /// Hard cap for user-configured `request_max_retries`.
 const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
+/// Configuration for OAuth 2.0 Device Authorization Grant (RFC 8628).
+/// This enables CLI authentication flows where the user authorizes via a browser.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct OAuthDeviceFlowConfig {
+    /// URL to request the device code (e.g., "https://github.com/login/device/code")
+    pub device_code_url: String,
+    /// URL to poll for the access token (e.g., "https://github.com/login/oauth/access_token")
+    pub token_url: String,
+    /// OAuth client ID registered for this application
+    pub client_id: String,
+    /// OAuth scopes to request (optional, e.g., "read:user")
+    pub scope: Option<String>,
+    /// Additional token exchange URL if the OAuth token needs to be exchanged for a provider-specific token
+    /// (e.g., GitHub token -> Copilot session token)
+    pub token_exchange_url: Option<String>,
+    /// HTTP headers to include when exchanging tokens (key-value pairs)
+    pub token_exchange_headers: Option<HashMap<String, String>>,
+    /// HTTP headers to include when exchanging tokens where values come from environment variables
+    pub token_exchange_env_headers: Option<HashMap<String, String>>,
+}
+
 /// Wire protocol that the provider speaks. Most third-party services only
 /// implement the classic OpenAI Chat Completions JSON schema, whereas OpenAI
 /// itself (and a handful of others) additionally expose the more modern
@@ -86,45 +107,19 @@ pub struct ModelProviderInfo {
     /// and API key (if needed) comes from the "env_key" environment variable.
     #[serde(default)]
     pub requires_openai_auth: bool,
+
+    /// OAuth Device Flow configuration for CLI authentication (optional).
+    /// When present, the provider supports `codex login <provider>` to authenticate via OAuth Device Flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_device_flow: Option<OAuthDeviceFlowConfig>,
+
+    /// List of model names supported by this provider (e.g., ["gpt-4", "claude-3-opus"]).
+    /// When specified, these models will be shown in the model selection menu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
 }
 
 impl ModelProviderInfo {
-    /// Construct a `POST` RequestBuilder for the given URL using the provided
-    /// reqwest Client applying:
-    ///   • provider-specific headers (static + env based)
-    ///   • Bearer auth header when an API key is available.
-    ///   • Auth token for OAuth.
-    ///
-    /// If the provider declares an `env_key` but the variable is missing/empty, returns an [`Err`] identical to the
-    /// one produced by [`ModelProviderInfo::api_key`].
-    pub async fn create_request_builder<'a>(
-        &'a self,
-        client: &'a reqwest::Client,
-        auth: &Option<CodexAuth>,
-    ) -> crate::error::Result<reqwest::RequestBuilder> {
-        let effective_auth = match self.api_key(auth).await {
-            Ok(Some(key)) => Some(CodexAuth::from_api_key(&key)),
-            Ok(None) => auth.clone(),
-            Err(err) => {
-                if auth.is_some() {
-                    auth.clone()
-                } else {
-                    return Err(err);
-                }
-            }
-        };
-
-        let url = self.get_full_url(&effective_auth);
-
-        let mut builder = client.post(url);
-
-        if let Some(auth) = effective_auth.as_ref() {
-            builder = builder.bearer_auth(auth.get_token().await?);
-        }
-
-        Ok(self.apply_http_headers(builder))
-    }
-
     fn get_query_string(&self) -> String {
         self.query_params
             .as_ref()
@@ -205,20 +200,13 @@ impl ModelProviderInfo {
     ///
     /// For GITHUBCOPILOT_API_KEY, falls back to reading from auth.json if the
     /// env var is not set.
-    pub async fn api_key(&self, auth: &Option<CodexAuth>) -> crate::error::Result<Option<String>> {
+    pub async fn api_key(&self, _auth: &Option<CodexAuth>) -> crate::error::Result<Option<String>> {
         match &self.env_key {
             Some(env_key) => {
                 let env_value = std::env::var(env_key);
                 match env_value {
                     Ok(v) if !v.trim().is_empty() => Ok(Some(v)),
                     _ => {
-                        // Fallback: for GITHUBCOPILOT_API_KEY, get fresh session token
-                        if env_key == "GITHUBCOPILOT_API_KEY"
-                            && let Some(token) = get_copilot_session_token(auth).await
-                        {
-                            return Ok(Some(token));
-                        }
-
                         // If still not found, return error
                         Err(crate::error::CodexErr::EnvVar(EnvVarError {
                             var: env_key.clone(),
@@ -229,6 +217,77 @@ impl ModelProviderInfo {
             }
             None => Ok(None),
         }
+    }
+    pub async fn create_request_builder<'a>(
+        &'a self,
+        client: &'a reqwest::Client,
+        auth: &Option<CodexAuth>,
+        provider_id: Option<&str>,
+    ) -> crate::error::Result<reqwest::RequestBuilder> {
+        let effective_auth = match self.api_key(auth).await {
+            Ok(Some(key)) => Some(CodexAuth::from_api_key(&key)),
+            Ok(None) => {
+                // No API key configured, try OAuth tokens
+                if let Some(oauth_token) = self.get_oauth_token(auth, provider_id).await {
+                    Some(CodexAuth::from_api_key(&oauth_token))
+                } else {
+                    auth.clone()
+                }
+            }
+            Err(err) => {
+                // Try OAuth tokens if API key lookup failed
+                if let Some(oauth_token) = self.get_oauth_token(auth, provider_id).await {
+                    Some(CodexAuth::from_api_key(&oauth_token))
+                } else if auth.is_some() {
+                    auth.clone()
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+
+        let url = self.get_full_url(&effective_auth);
+
+        let mut builder = client.post(url);
+
+        if let Some(auth) = effective_auth.as_ref() {
+            builder = builder.bearer_auth(auth.get_token().await?);
+        }
+
+        Ok(self.apply_http_headers(builder))
+    }
+
+    async fn get_oauth_token(
+        &self,
+        auth: &Option<CodexAuth>,
+        provider_id: Option<&str>,
+    ) -> Option<String> {
+        let auth_json = auth.as_ref()?.get_current_auth_json()?;
+
+        // Try provider_id first if available
+        if let Some(id) = provider_id {
+            if let Some(token_data) = auth_json.oauth_tokens.get(id) {
+                return Some(
+                    token_data
+                        .session_token
+                        .clone()
+                        .unwrap_or_else(|| token_data.access_token.clone()),
+                );
+            }
+        }
+
+        // Fall back to matching by provider name for backwards compatibility
+        for (key, token_data) in &auth_json.oauth_tokens {
+            if key == &self.name {
+                return Some(
+                    token_data
+                        .session_token
+                        .clone()
+                        .unwrap_or_else(|| token_data.access_token.clone()),
+                );
+            }
+        }
+        None
     }
 
     /// Effective maximum number of request retries for this provider.
@@ -251,118 +310,6 @@ impl ModelProviderInfo {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
-}
-
-async fn get_copilot_session_token(auth: &Option<CodexAuth>) -> Option<String> {
-    use crate::auth::write_auth_json;
-    use chrono::Utc;
-
-    // Try using provided auth object first
-    if let Some(auth_obj) = auth
-        && let Some(mut auth_json) = auth_obj.get_current_auth_json()
-    {
-        // Check if we have a cached session token that hasn't expired
-        if let Some(session_token) = &auth_json.copilot_session_token
-            && let Some(expiration) = auth_json.copilot_token_expiration
-            && expiration > Utc::now()
-        {
-            return Some(session_token.clone());
-        }
-
-        // Need to exchange GitHub token for new session token
-        if let Some(github_token) = &auth_json.github_token {
-            match exchange_github_token_for_copilot(github_token).await {
-                Ok((session_token, expiration)) => {
-                    // Update cache in auth.json
-                    auth_json.copilot_session_token = Some(session_token.clone());
-                    auth_json.copilot_token_expiration = Some(expiration);
-
-                    // Write back to file
-                    if let Ok(home) = std::env::var("HOME") {
-                        let auth_file = std::path::Path::new(&home).join(".codex/auth.json");
-                        let _ = write_auth_json(&auth_file, &auth_json);
-                    }
-
-                    return Some(session_token);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to exchange GitHub token for Copilot session: {}", e);
-                }
-            }
-        }
-    }
-
-    // Fallback: directly read auth.json from default location
-    if let Ok(home) = std::env::var("HOME") {
-        let auth_file = std::path::Path::new(&home).join(".codex/auth.json");
-        if let Ok(contents) = std::fs::read_to_string(&auth_file)
-            && let Ok(mut auth_json) = serde_json::from_str::<crate::auth::AuthDotJson>(&contents)
-        {
-            // Check cached session token
-            if let Some(session_token) = &auth_json.copilot_session_token
-                && let Some(expiration) = auth_json.copilot_token_expiration
-                && expiration > Utc::now()
-            {
-                return Some(session_token.clone());
-            }
-
-            // Exchange GitHub token
-            if let Some(github_token) = &auth_json.github_token
-                && let Ok((session_token, expiration)) =
-                    exchange_github_token_for_copilot(github_token).await
-            {
-                auth_json.copilot_session_token = Some(session_token.clone());
-                auth_json.copilot_token_expiration = Some(expiration);
-                let _ = write_auth_json(&auth_file, &auth_json);
-                return Some(session_token);
-            }
-        }
-    }
-
-    None
-}
-
-async fn exchange_github_token_for_copilot(
-    github_token: &str,
-) -> Result<(String, chrono::DateTime<chrono::Utc>), Box<dyn std::error::Error + Send + Sync>> {
-    use chrono::{Duration, Utc};
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.github.com/copilot_internal/v2/token")
-        .header("Authorization", format!("bearer {github_token}"))
-        .header("Accept", "application/json")
-        .header("User-Agent", "GithubCopilot/1.155.0")
-        .header("editor-version", "vscode/1.85.1")
-        .header("editor-plugin-version", "copilot/1.155.0")
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("Copilot token exchange failed with status {status}: {text}").into());
-    }
-
-    #[derive(serde::Deserialize)]
-    struct CopilotTokenResponse {
-        token: String,
-        expires_at: Option<i64>,
-        refresh_in: Option<u64>,
-    }
-
-    let data: CopilotTokenResponse = resp.json().await?;
-
-    let expiration = if let Some(refresh_in) = data.refresh_in {
-        Utc::now() + Duration::seconds(refresh_in as i64)
-    } else if let Some(expires_at) = data.expires_at {
-        chrono::DateTime::from_timestamp(expires_at, 0)
-            .unwrap_or_else(|| Utc::now() + Duration::hours(1))
-    } else {
-        Utc::now() + Duration::hours(1)
-    };
-
-    Ok((data.token, expiration))
 }
 
 const DEFAULT_OLLAMA_PORT: u32 = 11434;
@@ -415,40 +362,8 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
                 requires_openai_auth: true,
-            },
-        ),
-        (
-            "githubcopilot",
-            P {
-                name: "GithubCopilot".into(),
-                base_url: Some("https://api.githubcopilot.com".into()),
-                env_key: Some("GITHUBCOPILOT_API_KEY".into()),
-                env_key_instructions: Some(
-                    "Run 'codex login copilot' to authenticate with GitHub Copilot".into(),
-                ),
-                wire_api: WireApi::Chat,
-                query_params: None,
-                http_headers: Some(
-                    [
-                        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-                        (
-                            "User-Agent".to_string(),
-                            "GithubCopilot/1.155.0".to_string(),
-                        ),
-                        ("editor-version".to_string(), "vscode/1.85.1".to_string()),
-                        (
-                            "editor-plugin-version".to_string(),
-                            "copilot/1.155.0".to_string(),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-                env_http_headers: None,
-                request_max_retries: None,
-                stream_max_retries: None,
-                stream_idle_timeout_ms: None,
-                requires_openai_auth: false,
+                oauth_device_flow: None,
+                models: None,
             },
         ),
         (BUILT_IN_OSS_MODEL_PROVIDER_ID, create_oss_provider()),
@@ -493,6 +408,8 @@ pub fn create_oss_provider_with_base_url(base_url: &str) -> ModelProviderInfo {
         stream_max_retries: None,
         stream_idle_timeout_ms: None,
         requires_openai_auth: false,
+        oauth_device_flow: None,
+        models: None,
     }
 }
 
@@ -532,6 +449,8 @@ base_url = "http://localhost:11434/v1"
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -561,6 +480,8 @@ query_params = { api-version = "2025-04-01-preview" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -593,6 +514,8 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
@@ -615,6 +538,8 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
                 requires_openai_auth: false,
+                oauth_device_flow: None,
+                models: None,
             }
         }
 
@@ -647,6 +572,8 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             stream_max_retries: None,
             stream_idle_timeout_ms: None,
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
         assert!(named_provider.is_azure_responses_endpoint());
 

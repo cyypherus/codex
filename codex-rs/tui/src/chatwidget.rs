@@ -1556,59 +1556,85 @@ impl ChatWidget {
         let current_model = self.config.model.clone();
         let current_effort = self.config.model_reasoning_effort;
         let current_provider = &self.config.model_provider.name;
+        let current_provider_info = &self.config.model_provider;
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
 
-        // Use provider-specific presets, with fallback to OpenAI
-        let presets: Vec<ModelPreset> = if current_provider.eq_ignore_ascii_case("openai") {
-            builtin_model_presets(auth_mode)
-        } else {
-            builtin_model_presets_for_provider(current_provider)
-        };
-
         let mut items: Vec<SelectionItem> = Vec::new();
-        for preset in presets.iter() {
-            let name = preset.label.to_string();
-            let description = Some(preset.description.to_string());
-            let is_current = preset.model == current_model && preset.effort == current_effort;
-            let model_slug = preset.model.to_string();
-            let effort = preset.effort;
-            let current_model = current_model.clone();
-            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
-                tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
-                    cwd: None,
-                    approval_policy: None,
-                    sandbox_policy: None,
-                    model: Some(model_slug.clone()),
-                    effort: Some(effort),
-                    summary: None,
-                }));
-                tx.send(AppEvent::UpdateModel(model_slug.clone()));
-                tx.send(AppEvent::UpdateReasoningEffort(effort));
-                tx.send(AppEvent::PersistModelSelection {
-                    model: model_slug.clone(),
-                    effort,
+
+        // If provider has models list configured, use that; otherwise use presets
+        if let Some(models) = &current_provider_info.models {
+            // Simple model list without reasoning effort options
+            for model in models {
+                let name = model.clone();
+                let is_current = *model == current_model;
+                let model_slug = model.clone();
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                        cwd: None,
+                        approval_policy: None,
+                        sandbox_policy: None,
+                        model: Some(model_slug.clone()),
+                        effort: None,
+                        summary: None,
+                    }));
+                    tx.send(AppEvent::UpdateModel(model_slug.clone()));
+                    tx.send(AppEvent::PersistModelSelection {
+                        model: model_slug.clone(),
+                        effort: None,
+                    });
+                })];
+                items.push(SelectionItem {
+                    name,
+                    description: None,
+                    is_current,
+                    actions,
+                    dismiss_on_select: true,
+                    search_value: None,
                 });
-                tracing::info!(
-                    "New model: {}, New effort: {}, Current model: {}, Current effort: {}",
-                    model_slug.clone(),
-                    effort
-                        .map(|effort| effort.to_string())
-                        .unwrap_or_else(|| "none".to_string()),
-                    current_model,
-                    current_effort
-                        .map(|effort| effort.to_string())
-                        .unwrap_or_else(|| "none".to_string())
-                );
-            })];
-            items.push(SelectionItem {
-                name,
-                description,
-                is_current,
-                actions,
-                dismiss_on_select: true,
-                search_value: None,
-            });
+            }
+        } else {
+            // Use provider-specific presets, with fallback to OpenAI
+            let presets: Vec<ModelPreset> = if current_provider.eq_ignore_ascii_case("openai") {
+                builtin_model_presets(auth_mode)
+            } else {
+                builtin_model_presets_for_provider(current_provider)
+            };
+
+            for preset in presets.iter() {
+                let name = preset.label.to_string();
+                let description = Some(preset.description.to_string());
+                let is_current = preset.model == current_model && preset.effort == current_effort;
+                let model_slug = preset.model.to_string();
+                let effort = preset.effort;
+
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::CodexOp(Op::OverrideTurnContext {
+                        cwd: None,
+                        approval_policy: None,
+                        sandbox_policy: None,
+                        model: Some(model_slug.clone()),
+                        effort: Some(effort),
+                        summary: None,
+                    }));
+                    tx.send(AppEvent::UpdateModel(model_slug.clone()));
+                    tx.send(AppEvent::UpdateReasoningEffort(effort));
+                    tx.send(AppEvent::PersistModelSelection {
+                        model: model_slug.clone(),
+                        effort,
+                    });
+                })];
+                items.push(SelectionItem {
+                    name,
+                    description,
+                    is_current,
+                    actions,
+                    dismiss_on_select: true,
+                    search_value: None,
+                });
+            }
         }
+
+        let subtitle = if current_provider.eq_ignore_ascii_case("openai") {};
 
         let subtitle = if current_provider.eq_ignore_ascii_case("openai") {
             "Switch between OpenAI models for this and future Codex CLI session".to_string()

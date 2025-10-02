@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
@@ -474,6 +475,7 @@ async fn persist_tokens_async(
         }
         let auth = AuthDotJson {
             openai_api_key: api_key,
+            oauth_tokens: HashMap::new(),
             githubcopilot_api_key: None,
             github_token: None,
             copilot_session_token: None,

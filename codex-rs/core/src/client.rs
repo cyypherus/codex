@@ -152,6 +152,7 @@ impl ModelClient {
     /// the provider config.  Public callers always invoke `stream()` – the
     /// specialised helpers are private to avoid accidental misuse.
     pub async fn stream(&self, prompt: &Prompt) -> Result<ResponseStream> {
+        let auth = self.auth_manager.as_ref().and_then(|m| m.auth());
         match self.provider.wire_api {
             WireApi::Responses => self.stream_responses(prompt).await,
             WireApi::Chat => {
@@ -161,6 +162,8 @@ impl ModelClient {
                     &self.config.model_family,
                     &self.client,
                     &self.provider,
+                    &auth,
+                    Some(&self.config.model_provider_id),
                 )
                 .await?;
 
@@ -304,9 +307,13 @@ impl ModelClient {
             serde_json::to_string(payload_json)
         );
 
+        eprintln!("[DEBUG ModelClient] model_provider_id from config: {:?}", self.config.model_provider_id);
+        eprintln!("[DEBUG ModelClient] auth_manager present: {}", auth_manager.is_some());
+        eprintln!("[DEBUG ModelClient] auth.is_some(): {}", auth.is_some());
+
         let mut req_builder = self
             .provider
-            .create_request_builder(&self.client, &auth)
+            .create_request_builder(&self.client, &auth, Some(&self.config.model_provider_id))
             .await
             .map_err(StreamAttemptError::Fatal)?;
 
@@ -1011,6 +1018,8 @@ mod tests {
             stream_max_retries: Some(0),
             stream_idle_timeout_ms: Some(1000),
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let events = collect_events(
@@ -1071,6 +1080,8 @@ mod tests {
             stream_max_retries: Some(0),
             stream_idle_timeout_ms: Some(1000),
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let events = collect_events(&[sse1.as_bytes()], provider).await;
@@ -1105,6 +1116,8 @@ mod tests {
             stream_max_retries: Some(0),
             stream_idle_timeout_ms: Some(1000),
             requires_openai_auth: false,
+            oauth_device_flow: None,
+            models: None,
         };
 
         let events = collect_events(&[sse1.as_bytes()], provider).await;
@@ -1210,6 +1223,8 @@ mod tests {
                 stream_max_retries: Some(0),
                 stream_idle_timeout_ms: Some(1000),
                 requires_openai_auth: false,
+                oauth_device_flow: None,
+                models: None,
             };
 
             let out = run_sse(evs, provider).await;

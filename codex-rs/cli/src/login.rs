@@ -1,10 +1,14 @@
 use codex_common::CliConfigOverrides;
 use codex_core::CodexAuth;
 use codex_core::auth::CLIENT_ID;
+use codex_core::auth::OAuthProviderToken;
+use codex_core::auth::get_auth_file;
 use codex_core::auth::login_with_api_key;
 use codex_core::auth::logout;
+use codex_core::auth::write_auth_json;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::oauth_device_flow;
 use codex_login::ServerOptions;
 use codex_login::run_login_server;
 use codex_protocol::mcp_protocol::AuthMode;
@@ -37,38 +41,102 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     }
 }
 
-/// Attempt to log in to GitHub Copilot using the device-code flow and persist the resulting
-/// API key into the standard auth.json. This mirrors how other simple API-key providers are
-/// handled: store the key and set the corresponding environment variable so provider configs
-/// that reference `GITHUBCOPILOT_API_KEY` will work.
-pub async fn run_login_with_github_copilot(cli_config_overrides: CliConfigOverrides) -> ! {
+/// Generic OAuth login for any provider with oauth_device_flow configured
+pub async fn run_login_with_oauth_provider(
+    cli_config_overrides: CliConfigOverrides,
+    provider_id: String,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides);
 
-    // The actual device-code flow helper is expected to live in a small crate/module
-    // named `github_copilot` that exposes `get_device_flow_key() -> anyhow::Result<String>`.
-    // If that helper is not present at build time, this will fail to compile; the helper
-    // should implement the device-code polling logic (similar to the TS implementation).
-    match github_copilot::get_device_flow_key().await {
-        Ok(key) => {
-            // Persist into auth.json so future runs can pick it up
-            match codex_core::auth::login_with_githubcopilot_api_key(&config.codex_home, &key) {
-                Ok(_) => {
-                    // Make available to the running process as well
-                    // Copilot key saved to auth.json. Do not set a process-wide environment
-                    // variable here; users who need it for subprocesses can export the
-                    // variable in their shell. This avoids issues with setting env vars
-                    // in some execution contexts.
-                    eprintln!("Successfully logged in (GitHub Copilot)");
-                    std::process::exit(0);
-                }
-                Err(e) => {
-                    eprintln!("Error saving GitHub Copilot API key: {e}");
-                    std::process::exit(1);
+    // Load all providers (built-in + user-configured)
+    let providers = &config.model_providers;
+    let provider = match providers.get(&provider_id) {
+        Some(p) => p,
+        None => {
+            eprintln!("Provider '{provider_id}' not found. Available providers with OAuth:");
+            for (id, p) in providers.iter() {
+                if p.oauth_device_flow.is_some() {
+                    eprintln!("  - {id}");
                 }
             }
+            std::process::exit(1);
+        }
+    };
+
+    let oauth_config = match &provider.oauth_device_flow {
+        Some(cfg) => cfg,
+        None => {
+            eprintln!("Provider '{provider_id}' does not support OAuth device flow");
+            std::process::exit(1);
+        }
+    };
+
+    eprintln!("Logging in to {}...", provider.name);
+
+    match oauth_device_flow::run_device_flow(oauth_config, &provider.name).await {
+        Ok(token) => {
+            // Handle optional token exchange
+            let (final_token, expires_in) =
+                if let Some(exchange_url) = &oauth_config.token_exchange_url {
+                    match oauth_device_flow::exchange_token(
+                        &token.access_token,
+                        exchange_url,
+                        oauth_config.token_exchange_headers.as_ref(),
+                        oauth_config.token_exchange_env_headers.as_ref(),
+                    )
+                    .await
+                    {
+                        Ok((exchanged, exp)) => (exchanged, exp.or(token.expires_in)),
+                        Err(e) => {
+                            eprintln!("Token exchange failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    (token.access_token.clone(), token.expires_in)
+                };
+
+            // Save to auth.json
+            let auth_file = get_auth_file(&config.codex_home);
+            let mut auth_json = codex_core::auth::read_auth_json(&auth_file).unwrap_or_else(|_| {
+                codex_core::auth::AuthDotJson {
+                    openai_api_key: None,
+                    oauth_tokens: std::collections::HashMap::new(),
+                    githubcopilot_api_key: None,
+                    github_token: None,
+                    copilot_session_token: None,
+                    copilot_token_expiration: None,
+                    tokens: None,
+                    last_refresh: None,
+                }
+            });
+
+            let expires_at =
+                expires_in.map(|secs| chrono::Utc::now() + chrono::Duration::seconds(secs as i64));
+            auth_json.oauth_tokens.insert(
+                provider_id.clone(),
+                OAuthProviderToken {
+                    access_token: token.access_token.clone(),
+                    expires_at,
+                    refresh_token: token.refresh_token,
+                    session_token: if final_token != token.access_token {
+                        Some(final_token)
+                    } else {
+                        None
+                    },
+                },
+            );
+
+            if let Err(e) = write_auth_json(&auth_file, &auth_json) {
+                eprintln!("Error saving auth: {e}");
+                std::process::exit(1);
+            }
+
+            eprintln!("Successfully logged in to {}", provider.name);
+            std::process::exit(0);
         }
         Err(e) => {
-            eprintln!("Error logging in to GitHub Copilot: {e}");
+            eprintln!("OAuth login failed: {e}");
             std::process::exit(1);
         }
     }

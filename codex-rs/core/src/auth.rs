@@ -2,6 +2,7 @@ use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -153,6 +154,7 @@ impl CodexAuth {
     pub fn create_dummy_chatgpt_auth_for_testing() -> Self {
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
+            oauth_tokens: HashMap::new(),
             githubcopilot_api_key: None,
             github_token: None,
             copilot_session_token: None,
@@ -219,6 +221,7 @@ pub fn logout(codex_home: &Path) -> std::io::Result<bool> {
 pub fn login_with_api_key(codex_home: &Path, api_key: &str) -> std::io::Result<()> {
     let auth_dot_json = AuthDotJson {
         openai_api_key: Some(api_key.to_string()),
+        oauth_tokens: HashMap::new(),
         githubcopilot_api_key: None,
         github_token: None,
         copilot_session_token: None,
@@ -233,6 +236,7 @@ pub fn login_with_api_key(codex_home: &Path, api_key: &str) -> std::io::Result<(
 pub fn login_with_githubcopilot_api_key(codex_home: &Path, key: &str) -> std::io::Result<()> {
     let auth_dot_json = AuthDotJson {
         openai_api_key: None,
+        oauth_tokens: HashMap::new(),
         githubcopilot_api_key: None,
         github_token: Some(key.to_string()),
         copilot_session_token: None,
@@ -255,6 +259,7 @@ fn load_auth(codex_home: &Path) -> std::io::Result<Option<CodexAuth>> {
 
     let AuthDotJson {
         openai_api_key: auth_json_api_key,
+        oauth_tokens,
         githubcopilot_api_key: _githubcopilot_api_key,
         github_token: _github_token,
         copilot_session_token: _copilot_session_token,
@@ -274,6 +279,7 @@ fn load_auth(codex_home: &Path) -> std::io::Result<Option<CodexAuth>> {
         auth_file,
         auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
             openai_api_key: None,
+            oauth_tokens,
             githubcopilot_api_key: None,
             github_token: None,
             copilot_session_token: None,
@@ -294,6 +300,10 @@ pub fn try_read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
     let auth_dot_json: AuthDotJson = serde_json::from_str(&contents)?;
 
     Ok(auth_dot_json)
+}
+
+pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthDotJson> {
+    try_read_auth_json(auth_file)
 }
 
 pub fn write_auth_json(auth_file: &Path, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
@@ -389,10 +399,24 @@ pub struct AuthDotJson {
     #[serde(rename = "OPENAI_API_KEY")]
     pub openai_api_key: Option<String>,
 
-    #[serde(rename = "GITHUBCOPILOT_API_KEY")]
+    /// Generic OAuth tokens keyed by provider ID.
+    /// Each provider can store its OAuth access token here.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub oauth_tokens: HashMap<String, OAuthProviderToken>,
+
+    // Legacy Copilot-specific fields (deprecated, use oauth_tokens instead)
+    #[serde(
+        rename = "GITHUBCOPILOT_API_KEY",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub githubcopilot_api_key: Option<String>,
 
-    #[serde(rename = "GITHUB_TOKEN")]
+    #[serde(
+        rename = "GITHUB_TOKEN",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub github_token: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,6 +430,22 @@ pub struct AuthDotJson {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_refresh: Option<DateTime<Utc>>,
+}
+
+/// OAuth token information for a specific provider
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthProviderToken {
+    /// OAuth access token
+    pub access_token: String,
+    /// Optional expiration time
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Optional refresh token
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Optional provider-specific session token (e.g., Copilot session token)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 // Shared constant for token refresh (client id used for oauth token refresh flow)
@@ -439,6 +479,7 @@ mod tests {
         let _ = write_auth_file(
             AuthFileParams {
                 openai_api_key: None,
+
                 chatgpt_plan_type: "pro".to_string(),
             },
             codex_home.path(),
@@ -485,6 +526,7 @@ mod tests {
         let fake_jwt = write_auth_file(
             AuthFileParams {
                 openai_api_key: None,
+
                 chatgpt_plan_type: "pro".to_string(),
             },
             codex_home.path(),
@@ -506,6 +548,7 @@ mod tests {
         assert_eq!(
             &AuthDotJson {
                 openai_api_key: None,
+                oauth_tokens: HashMap::new(),
                 githubcopilot_api_key: None,
                 github_token: None,
                 copilot_session_token: None,
@@ -552,6 +595,7 @@ mod tests {
         let dir = tempdir()?;
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("sk-test-key".to_string()),
+            oauth_tokens: HashMap::new(),
             githubcopilot_api_key: None,
             github_token: None,
             copilot_session_token: None,

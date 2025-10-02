@@ -641,6 +641,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "chrono",
  "clap",
  "clap_complete",
  "codex-arg0",
@@ -707,6 +708,7 @@ dependencies = [
  "libc",
  "maplit",
  "mcp-types",
+ "open",
  "openssl-sys",
  "os_info",
  "portable-pty",

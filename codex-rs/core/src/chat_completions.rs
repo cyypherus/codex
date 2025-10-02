@@ -34,6 +34,8 @@ pub(crate) async fn stream_chat_completions(
     model_family: &ModelFamily,
     client: &reqwest::Client,
     provider: &ModelProviderInfo,
+    auth: &Option<crate::CodexAuth>,
+    provider_id: Option<&str>,
 ) -> Result<ResponseStream> {
     if prompt.output_schema.is_some() {
         return Err(CodexErr::UnsupportedOperation(
@@ -302,7 +304,7 @@ pub(crate) async fn stream_chat_completions(
     loop {
         attempt += 1;
 
-        let req_builder = provider.create_request_builder(client, &None).await?;
+        let req_builder = provider.create_request_builder(client, auth, provider_id).await?;
 
         let res = req_builder
             .header(reqwest::header::ACCEPT, "text/event-stream")
