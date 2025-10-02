@@ -12,7 +12,7 @@ use eventsource_stream::Eventsource;
 use futures::prelude::*;
 use regex_lite::Regex;
 use reqwest::StatusCode;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -89,7 +89,41 @@ impl ModelClient {
         summary: ReasoningSummaryConfig,
         conversation_id: ConversationId,
     ) -> Self {
-        let client = create_client();
+        let client = if provider.name.eq_ignore_ascii_case("githubcopilot") {
+            let mut headers = HeaderMap::new();
+
+            headers.insert(
+                "originator",
+                crate::default_client::ORIGINATOR.header_value.clone(),
+            );
+
+            headers.insert(
+                "session_id",
+                HeaderValue::from_str(&conversation_id.to_string())
+                    .unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+
+            if let Ok(org) = std::env::var("OPENAI_ORGANIZATION")
+                && !org.trim().is_empty()
+                && let Ok(hv) = HeaderValue::from_str(&org)
+            {
+                headers.insert("OpenAI-Organization", hv);
+            }
+            if let Ok(proj) = std::env::var("OPENAI_PROJECT")
+                && !proj.trim().is_empty()
+                && let Ok(hv) = HeaderValue::from_str(&proj)
+            {
+                headers.insert("OpenAI-Project", hv);
+            }
+
+            reqwest::Client::builder()
+                .default_headers(headers)
+                .user_agent(crate::default_client::get_codex_user_agent())
+                .build()
+                .unwrap_or_else(|_| create_client())
+        } else {
+            create_client()
+        };
 
         Self {
             config,

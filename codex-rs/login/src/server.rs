@@ -474,6 +474,10 @@ async fn persist_tokens_async(
         }
         let auth = AuthDotJson {
             openai_api_key: api_key,
+            githubcopilot_api_key: None,
+            github_token: None,
+            copilot_session_token: None,
+            copilot_token_expiration: None,
             tokens: Some(tokens),
             last_refresh: Some(Utc::now()),
         };

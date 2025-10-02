@@ -31,6 +31,10 @@ async fn user_info_returns_email_from_auth_json() {
 
     let auth = AuthDotJson {
         openai_api_key: None,
+        githubcopilot_api_key: None,
+        github_token: None,
+        copilot_session_token: None,
+        copilot_token_expiration: None,
         tokens: Some(TokenData {
             id_token,
             access_token: "access".to_string(),

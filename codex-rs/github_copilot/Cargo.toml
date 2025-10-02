@@ -1,0 +1,20 @@
+[package]
+name = "github_copilot"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal helper crate for performing GitHub Copilot device-flow login (stubbed device-flow implementation)."
+license = "MIT"
+publish = false
+
+[lib]
+name = "github_copilot"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = "0.4"
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "time"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+open = "3.2"

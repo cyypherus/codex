@@ -140,7 +140,7 @@ impl CodexAuth {
             .and_then(|t| t.id_token.chatgpt_plan_type)
     }
 
-    fn get_current_auth_json(&self) -> Option<AuthDotJson> {
+    pub fn get_current_auth_json(&self) -> Option<AuthDotJson> {
         #[expect(clippy::unwrap_used)]
         self.auth_dot_json.lock().unwrap().clone()
     }
@@ -153,6 +153,10 @@ impl CodexAuth {
     pub fn create_dummy_chatgpt_auth_for_testing() -> Self {
         let auth_dot_json = AuthDotJson {
             openai_api_key: None,
+            githubcopilot_api_key: None,
+            github_token: None,
+            copilot_session_token: None,
+            copilot_token_expiration: None,
             tokens: Some(TokenData {
                 id_token: Default::default(),
                 access_token: "Access Token".to_string(),
@@ -215,6 +219,24 @@ pub fn logout(codex_home: &Path) -> std::io::Result<bool> {
 pub fn login_with_api_key(codex_home: &Path, api_key: &str) -> std::io::Result<()> {
     let auth_dot_json = AuthDotJson {
         openai_api_key: Some(api_key.to_string()),
+        githubcopilot_api_key: None,
+        github_token: None,
+        copilot_session_token: None,
+        copilot_token_expiration: None,
+        tokens: None,
+        last_refresh: None,
+    };
+    write_auth_json(&get_auth_file(codex_home), &auth_dot_json)
+}
+
+/// Writes an `auth.json` that contains only the GitHub Copilot API key.
+pub fn login_with_githubcopilot_api_key(codex_home: &Path, key: &str) -> std::io::Result<()> {
+    let auth_dot_json = AuthDotJson {
+        openai_api_key: None,
+        githubcopilot_api_key: None,
+        github_token: Some(key.to_string()),
+        copilot_session_token: None,
+        copilot_token_expiration: None,
         tokens: None,
         last_refresh: None,
     };
@@ -233,6 +255,10 @@ fn load_auth(codex_home: &Path) -> std::io::Result<Option<CodexAuth>> {
 
     let AuthDotJson {
         openai_api_key: auth_json_api_key,
+        githubcopilot_api_key: _githubcopilot_api_key,
+        github_token: _github_token,
+        copilot_session_token: _copilot_session_token,
+        copilot_token_expiration: _copilot_token_expiration,
         tokens,
         last_refresh,
     } = auth_dot_json;
@@ -248,6 +274,10 @@ fn load_auth(codex_home: &Path) -> std::io::Result<Option<CodexAuth>> {
         auth_file,
         auth_dot_json: Arc::new(Mutex::new(Some(AuthDotJson {
             openai_api_key: None,
+            githubcopilot_api_key: None,
+            github_token: None,
+            copilot_session_token: None,
+            copilot_token_expiration: None,
             tokens,
             last_refresh,
         }))),
@@ -359,6 +389,18 @@ pub struct AuthDotJson {
     #[serde(rename = "OPENAI_API_KEY")]
     pub openai_api_key: Option<String>,
 
+    #[serde(rename = "GITHUBCOPILOT_API_KEY")]
+    pub githubcopilot_api_key: Option<String>,
+
+    #[serde(rename = "GITHUB_TOKEN")]
+    pub github_token: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot_session_token: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot_token_expiration: Option<DateTime<Utc>>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<TokenData>,
 
@@ -464,6 +506,10 @@ mod tests {
         assert_eq!(
             &AuthDotJson {
                 openai_api_key: None,
+                githubcopilot_api_key: None,
+                github_token: None,
+                copilot_session_token: None,
+                copilot_token_expiration: None,
                 tokens: Some(TokenData {
                     id_token: IdTokenInfo {
                         email: Some("user@example.com".to_string()),
@@ -472,7 +518,7 @@ mod tests {
                     },
                     access_token: "test-access-token".to_string(),
                     refresh_token: "test-refresh-token".to_string(),
-                    account_id: None,
+                    account_id: Some("test-account-id".to_string()),
                 }),
                 last_refresh: Some(
                     DateTime::parse_from_rfc3339(LAST_REFRESH)
@@ -506,6 +552,10 @@ mod tests {
         let dir = tempdir()?;
         let auth_dot_json = AuthDotJson {
             openai_api_key: Some("sk-test-key".to_string()),
+            githubcopilot_api_key: None,
+            github_token: None,
+            copilot_session_token: None,
+            copilot_token_expiration: None,
             tokens: None,
             last_refresh: None,
         };
@@ -555,7 +605,8 @@ mod tests {
             "tokens": {
                 "id_token": fake_jwt,
                 "access_token": "test-access-token",
-                "refresh_token": "test-refresh-token"
+                "refresh_token": "test-refresh-token",
+                "account_id": "test-account-id"
             },
             "last_refresh": LAST_REFRESH,
         });

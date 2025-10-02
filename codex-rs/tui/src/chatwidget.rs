@@ -101,6 +101,7 @@ use codex_common::approval_presets::ApprovalPreset;
 use codex_common::approval_presets::builtin_approval_presets;
 use codex_common::model_presets::ModelPreset;
 use codex_common::model_presets::builtin_model_presets;
+use codex_common::model_presets::builtin_model_presets_for_provider;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
 use codex_core::protocol::AskForApproval;
@@ -1554,8 +1555,15 @@ impl ChatWidget {
     pub(crate) fn open_model_popup(&mut self) {
         let current_model = self.config.model.clone();
         let current_effort = self.config.model_reasoning_effort;
+        let current_provider = &self.config.model_provider.name;
         let auth_mode = self.auth_manager.auth().map(|auth| auth.mode);
-        let presets: Vec<ModelPreset> = builtin_model_presets(auth_mode);
+
+        // Use provider-specific presets, with fallback to OpenAI
+        let presets: Vec<ModelPreset> = if current_provider.eq_ignore_ascii_case("openai") {
+            builtin_model_presets(auth_mode)
+        } else {
+            builtin_model_presets_for_provider(current_provider)
+        };
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.iter() {
@@ -1602,11 +1610,17 @@ impl ChatWidget {
             });
         }
 
+        let subtitle = if current_provider.eq_ignore_ascii_case("openai") {
+            "Switch between OpenAI models for this and future Codex CLI session".to_string()
+        } else {
+            format!(
+                "Switch between {current_provider} models for this and future Codex CLI session"
+            )
+        };
+
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: "Select model and reasoning level".to_string(),
-            subtitle: Some(
-                "Switch between OpenAI models for this and future Codex CLI session".to_string(),
-            ),
+            subtitle: Some(subtitle),
             footer_hint: Some(STANDARD_POPUP_HINT_LINE.to_string()),
             items,
             ..Default::default()

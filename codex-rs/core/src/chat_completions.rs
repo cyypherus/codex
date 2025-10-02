@@ -172,6 +172,10 @@ pub(crate) async fn stream_chat_completions(
                     last_assistant_text = Some(text.clone());
                 }
 
+                if text.trim().is_empty() {
+                    continue;
+                }
+
                 let mut msg = json!({"role": role, "content": text});
                 if role == "assistant"
                     && let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
@@ -231,6 +235,9 @@ pub(crate) async fn stream_chat_completions(
                 messages.push(msg);
             }
             ResponseItem::FunctionCallOutput { call_id, output } => {
+                if output.content.trim().is_empty() {
+                    continue;
+                }
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -258,6 +265,9 @@ pub(crate) async fn stream_chat_completions(
                 }));
             }
             ResponseItem::CustomToolCallOutput { call_id, output } => {
+                if output.trim().is_empty() {
+                    continue;
+                }
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,

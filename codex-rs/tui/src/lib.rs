@@ -595,6 +595,10 @@ mod tests {
                 id_info.raw_jwt = FAKE_JWT.to_string();
                 let auth = AuthDotJson {
                     openai_api_key: None,
+                    githubcopilot_api_key: None,
+                    github_token: None,
+                    copilot_session_token: None,
+                    copilot_token_expiration: None,
                     tokens: Some(TokenData {
                         id_token: id_info,
                         access_token: "access-token".to_string(),

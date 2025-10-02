@@ -37,6 +37,43 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     }
 }
 
+/// Attempt to log in to GitHub Copilot using the device-code flow and persist the resulting
+/// API key into the standard auth.json. This mirrors how other simple API-key providers are
+/// handled: store the key and set the corresponding environment variable so provider configs
+/// that reference `GITHUBCOPILOT_API_KEY` will work.
+pub async fn run_login_with_github_copilot(cli_config_overrides: CliConfigOverrides) -> ! {
+    let config = load_config_or_exit(cli_config_overrides);
+
+    // The actual device-code flow helper is expected to live in a small crate/module
+    // named `github_copilot` that exposes `get_device_flow_key() -> anyhow::Result<String>`.
+    // If that helper is not present at build time, this will fail to compile; the helper
+    // should implement the device-code polling logic (similar to the TS implementation).
+    match github_copilot::get_device_flow_key().await {
+        Ok(key) => {
+            // Persist into auth.json so future runs can pick it up
+            match codex_core::auth::login_with_githubcopilot_api_key(&config.codex_home, &key) {
+                Ok(_) => {
+                    // Make available to the running process as well
+                    // Copilot key saved to auth.json. Do not set a process-wide environment
+                    // variable here; users who need it for subprocesses can export the
+                    // variable in their shell. This avoids issues with setting env vars
+                    // in some execution contexts.
+                    eprintln!("Successfully logged in (GitHub Copilot)");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Error saving GitHub Copilot API key: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error logging in to GitHub Copilot: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub async fn run_login_with_api_key(
     cli_config_overrides: CliConfigOverrides,
     api_key: String,

@@ -10,7 +10,7 @@ use codex_protocol::mcp_protocol::AuthMode;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::env::VarError;
+
 use std::time::Duration;
 
 use crate::error::EnvVarError;
@@ -102,7 +102,7 @@ impl ModelProviderInfo {
         client: &'a reqwest::Client,
         auth: &Option<CodexAuth>,
     ) -> crate::error::Result<reqwest::RequestBuilder> {
-        let effective_auth = match self.api_key() {
+        let effective_auth = match self.api_key(auth).await {
             Ok(Some(key)) => Some(CodexAuth::from_api_key(&key)),
             Ok(None) => auth.clone(),
             Err(err) => {
@@ -202,24 +202,30 @@ impl ModelProviderInfo {
     /// If `env_key` is Some, returns the API key for this provider if present
     /// (and non-empty) in the environment. If `env_key` is required but
     /// cannot be found, returns an error.
-    pub fn api_key(&self) -> crate::error::Result<Option<String>> {
+    ///
+    /// For GITHUBCOPILOT_API_KEY, falls back to reading from auth.json if the
+    /// env var is not set.
+    pub async fn api_key(&self, auth: &Option<CodexAuth>) -> crate::error::Result<Option<String>> {
         match &self.env_key {
             Some(env_key) => {
                 let env_value = std::env::var(env_key);
-                env_value
-                    .and_then(|v| {
-                        if v.trim().is_empty() {
-                            Err(VarError::NotPresent)
-                        } else {
-                            Ok(Some(v))
+                match env_value {
+                    Ok(v) if !v.trim().is_empty() => Ok(Some(v)),
+                    _ => {
+                        // Fallback: for GITHUBCOPILOT_API_KEY, get fresh session token
+                        if env_key == "GITHUBCOPILOT_API_KEY"
+                            && let Some(token) = get_copilot_session_token(auth).await
+                        {
+                            return Ok(Some(token));
                         }
-                    })
-                    .map_err(|_| {
-                        crate::error::CodexErr::EnvVar(EnvVarError {
+
+                        // If still not found, return error
+                        Err(crate::error::CodexErr::EnvVar(EnvVarError {
                             var: env_key.clone(),
                             instructions: self.env_key_instructions.clone(),
-                        })
-                    })
+                        }))
+                    }
+                }
             }
             None => Ok(None),
         }
@@ -245,6 +251,118 @@ impl ModelProviderInfo {
             .map(Duration::from_millis)
             .unwrap_or(Duration::from_millis(DEFAULT_STREAM_IDLE_TIMEOUT_MS))
     }
+}
+
+async fn get_copilot_session_token(auth: &Option<CodexAuth>) -> Option<String> {
+    use crate::auth::write_auth_json;
+    use chrono::Utc;
+
+    // Try using provided auth object first
+    if let Some(auth_obj) = auth
+        && let Some(mut auth_json) = auth_obj.get_current_auth_json()
+    {
+        // Check if we have a cached session token that hasn't expired
+        if let Some(session_token) = &auth_json.copilot_session_token
+            && let Some(expiration) = auth_json.copilot_token_expiration
+            && expiration > Utc::now()
+        {
+            return Some(session_token.clone());
+        }
+
+        // Need to exchange GitHub token for new session token
+        if let Some(github_token) = &auth_json.github_token {
+            match exchange_github_token_for_copilot(github_token).await {
+                Ok((session_token, expiration)) => {
+                    // Update cache in auth.json
+                    auth_json.copilot_session_token = Some(session_token.clone());
+                    auth_json.copilot_token_expiration = Some(expiration);
+
+                    // Write back to file
+                    if let Ok(home) = std::env::var("HOME") {
+                        let auth_file = std::path::Path::new(&home).join(".codex/auth.json");
+                        let _ = write_auth_json(&auth_file, &auth_json);
+                    }
+
+                    return Some(session_token);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to exchange GitHub token for Copilot session: {}", e);
+                }
+            }
+        }
+    }
+
+    // Fallback: directly read auth.json from default location
+    if let Ok(home) = std::env::var("HOME") {
+        let auth_file = std::path::Path::new(&home).join(".codex/auth.json");
+        if let Ok(contents) = std::fs::read_to_string(&auth_file)
+            && let Ok(mut auth_json) = serde_json::from_str::<crate::auth::AuthDotJson>(&contents)
+        {
+            // Check cached session token
+            if let Some(session_token) = &auth_json.copilot_session_token
+                && let Some(expiration) = auth_json.copilot_token_expiration
+                && expiration > Utc::now()
+            {
+                return Some(session_token.clone());
+            }
+
+            // Exchange GitHub token
+            if let Some(github_token) = &auth_json.github_token
+                && let Ok((session_token, expiration)) =
+                    exchange_github_token_for_copilot(github_token).await
+            {
+                auth_json.copilot_session_token = Some(session_token.clone());
+                auth_json.copilot_token_expiration = Some(expiration);
+                let _ = write_auth_json(&auth_file, &auth_json);
+                return Some(session_token);
+            }
+        }
+    }
+
+    None
+}
+
+async fn exchange_github_token_for_copilot(
+    github_token: &str,
+) -> Result<(String, chrono::DateTime<chrono::Utc>), Box<dyn std::error::Error + Send + Sync>> {
+    use chrono::{Duration, Utc};
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("bearer {github_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "GithubCopilot/1.155.0")
+        .header("editor-version", "vscode/1.85.1")
+        .header("editor-plugin-version", "copilot/1.155.0")
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Copilot token exchange failed with status {status}: {text}").into());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CopilotTokenResponse {
+        token: String,
+        expires_at: Option<i64>,
+        refresh_in: Option<u64>,
+    }
+
+    let data: CopilotTokenResponse = resp.json().await?;
+
+    let expiration = if let Some(refresh_in) = data.refresh_in {
+        Utc::now() + Duration::seconds(refresh_in as i64)
+    } else if let Some(expires_at) = data.expires_at {
+        chrono::DateTime::from_timestamp(expires_at, 0)
+            .unwrap_or_else(|| Utc::now() + Duration::hours(1))
+    } else {
+        Utc::now() + Duration::hours(1)
+    };
+
+    Ok((data.token, expiration))
 }
 
 const DEFAULT_OLLAMA_PORT: u32 = 11434;
@@ -297,6 +415,40 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
                 stream_max_retries: None,
                 stream_idle_timeout_ms: None,
                 requires_openai_auth: true,
+            },
+        ),
+        (
+            "githubcopilot",
+            P {
+                name: "GithubCopilot".into(),
+                base_url: Some("https://api.githubcopilot.com".into()),
+                env_key: Some("GITHUBCOPILOT_API_KEY".into()),
+                env_key_instructions: Some(
+                    "Run 'codex login copilot' to authenticate with GitHub Copilot".into(),
+                ),
+                wire_api: WireApi::Chat,
+                query_params: None,
+                http_headers: Some(
+                    [
+                        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
+                        (
+                            "User-Agent".to_string(),
+                            "GithubCopilot/1.155.0".to_string(),
+                        ),
+                        ("editor-version".to_string(), "vscode/1.85.1".to_string()),
+                        (
+                            "editor-plugin-version".to_string(),
+                            "copilot/1.155.0".to_string(),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                env_http_headers: None,
+                request_max_retries: None,
+                stream_max_retries: None,
+                stream_idle_timeout_ms: None,
+                requires_openai_auth: false,
             },
         ),
         (BUILT_IN_OSS_MODEL_PROVIDER_ID, create_oss_provider()),

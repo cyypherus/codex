@@ -22,6 +22,7 @@ members = [
     "responses-api-proxy",
     "tui",
     "utils/readiness",
+    "github_copilot",
 ]
 resolver = "2"
 
@@ -58,6 +59,7 @@ codex-utils-readiness = { path = "utils/readiness" }
 core_test_support = { path = "core/tests/common" }
 mcp-types = { path = "mcp-types" }
 mcp_test_support = { path = "mcp-server/tests/common" }
+github_copilot = { path = "github_copilot" }
 
 # External
 allocative = "0.3.3"
